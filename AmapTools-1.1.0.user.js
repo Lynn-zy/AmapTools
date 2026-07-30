@@ -24,10 +24,13 @@
 
     // ========== 接口匹配 ==========
 
-    /** 判断 URL 是否为 POI 详情接口 */
+    /** 判断 URL 是否为 POI 详情接口（兼容新旧版） */
     function isDetailUrl(url) {
         const u = String(url || "");
-        return u.includes("/detail/get/detail");
+        return (
+            u.includes("/detail/get/detail") ||
+            u.includes("/ssr/api/getPoiDetail")
+        );
     }
 
     // ========== GCJ-02 → WGS-84 坐标转换 ==========
@@ -125,7 +128,9 @@
      * 字段路径：data.spec.mining_shape.shape（"lng,lat;lng,lat;..." 格式）
      */
     function parseDetailToPolygonGeoJSON(detailData) {
-        if (!detailData || detailData.status !== "1") return null;
+        // 兼容旧版 status:"1" 和新版 SSR code:1 两种状态字段
+        const isOk = detailData?.status === "1" || detailData?.code === 1;
+        if (!detailData || !isOk) return null;
         const data = detailData.data;
         if (!data) return null;
 
