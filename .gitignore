@@ -1,0 +1,5 @@
+*.py
+*.geojson
+requirements.txt
+__pycache__/
+.codegraph/
