@@ -1,29 +1,43 @@
-# 高德地图POI爬虫
+# AmapTools - 高德地图扩展工具
 
-## 功能说明
-爬取指定城市、指定场景的POI数据，保存为GeoJSON和Excel格式
+## 简介
 
-## 安装依赖
-```bash
-pip install -r requirements.txt
-```
+- AmapTools 是一款 Tampermonkey 用户脚本，用于将高德地图的场景搜索结果的范围（如有）导出为 **GeoJSON**，提供 **WGS-84 / GCJ-02** 坐标系选择。
+- 支持当前常见的高德地图网页界面，已做新版适配，在搜索场景并点击查看详情后即可使用本工具导出数据。
+- 喜欢这个插件的话，欢迎在 GitHub 上点个 ⭐ Star 支持一下。
 
-## 使用方法
-1. 在 [高德开放平台](https://console.amap.com/dev/key/app) 申请免费的API Key
-2. 修改 `poi_crawler.py` 文件第14行，将 `YOUR_AMAP_API_KEY` 替换为你的API Key
-3. 根据需要修改配置参数（第17-23行）：
-   - `CITY`: 城市名称
-   - `SCENE_KEYWORD`: 搜索关键词（多个用|分隔）
-   - `SCENE_NAME`: 场景名称
-4. 运行程序：
-```bash
-python poi_crawler.py
-```
+## 功能
 
-## 输出文件
-- `E:/{城市名}_{场景名}_POI.geojson` - GeoJSON格式
-- `E:/{城市名}_{场景名}_POI.xlsx` - Excel格式
+- **导出方式**：在地图页面搜索框中搜索地点，搜索完毕后，搜索框下出现地点卡片，点击查看详情（或点击地图上的polygon）即可呼出面板。
+- **导出方式**：在面板中选择 **WGS-84 / GCJ-02**（单选），再使用 **复制** 或 **下载**。
+- **可拖拽面板**：支持拖动工具面板位置并记忆大致位置。
 
-## 注意事项
-- 免费版API限制：QPS=100，每日配额根据账号等级而定
-- 建议在请求间添加延时，避免触发限流
+## 安装
+
+### 1. 安装 Tampermonkey
+
+请安装 [Tampermonkey](https://www.tampermonkey.net/) 等用户脚本管理器。
+
+### 2. 安装 AmapTools
+
+- GitHub：[AmapTools - GitHub](https://github.com/Lynn-zy/AmapTools)
+
+### 3. 支持的网站
+
+脚本会在以下域名下运行：
+
+- `https://www.amap.com/*`
+- `https://ditu.amap.com/*`
+- `https://www.gaode.com/*`
+
+## 许可协议
+
+MIT License。你可以自由使用、修改和分发本项目的代码。
+
+## 免责声明
+
+本脚本仅供学习、研究和个人非商业用途，请勿用于可能违反高德地图服务条款的场景。
+
+使用本脚本可能涉及高德地图的 API 规则与数据版权，请遵守相关法律法规及服务协议。因使用本脚本产生的纠纷或责任由使用者自行承担，开发者不承担责任。
+
+「高德地图」为相应权利人的商标；本脚本与高德官方无关联。
