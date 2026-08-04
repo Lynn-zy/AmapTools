@@ -476,7 +476,7 @@
         // 标题
         const title = document.createElement("div");
         title.className = "polygon-title";
-        title.innerText = "\u25B3 " + currentPolygonData.name;
+        title.innerText = currentPolygonData.name;
         panel.appendChild(title);
 
         // 信息展示
@@ -552,12 +552,25 @@
         const actionsRow = document.createElement("div");
         actionsRow.className = "polygon-actions";
 
+        let copySuccessTimer = null;
         const btnCopy = document.createElement("button");
         btnCopy.type = "button";
         btnCopy.innerText = "复制 GeoJSON";
         btnCopy.onclick = function () {
             const geoJSON = buildExportData();
-            copyTextToClipboard(JSON.stringify(geoJSON, null, 2));
+            copyTextToClipboard(JSON.stringify(geoJSON, null, 2)).then(
+                function () {
+                    btnCopy.innerText = "✓ 复制成功";
+                    btnCopy.style.backgroundColor = "#4CAF50";
+                    btnCopy.style.borderColor = "#388E3C";
+                    if (copySuccessTimer) clearTimeout(copySuccessTimer);
+                    copySuccessTimer = setTimeout(function () {
+                        btnCopy.innerText = "复制 GeoJSON";
+                        btnCopy.style.backgroundColor = "";
+                        btnCopy.style.borderColor = "";
+                    }, 1800);
+                },
+            );
         };
 
         const btnDl = document.createElement("button");
@@ -637,11 +650,10 @@
                     console.log("已复制到剪贴板");
                 })
                 .catch(function () {
-                    fallbackCopyTextToClipboard(text);
+                    return fallbackCopyTextToClipboard(text);
                 });
         }
-        fallbackCopyTextToClipboard(text);
-        return Promise.resolve();
+        return fallbackCopyTextToClipboard(text);
     }
 
     /** 降级复制方案（兼容旧浏览器） */
@@ -653,13 +665,19 @@
         textarea.style.left = "-9999px";
         document.body.appendChild(textarea);
         textarea.select();
+        let success = false;
         try {
-            document.execCommand("copy");
-            console.log("已复制到剪贴板");
+            success = document.execCommand("copy");
+            if (success) {
+                console.log("已复制到剪贴板");
+            }
         } catch (err) {
             console.error("复制失败", err);
         }
         document.body.removeChild(textarea);
+        return success
+            ? Promise.resolve()
+            : Promise.reject(new Error("复制失败"));
     }
 
     /** 通用下载函数 */
