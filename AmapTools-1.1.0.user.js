@@ -358,6 +358,31 @@
         ` .polygon-actions button:hover {
             background: #1E88E5 !important;
         }
+
+        /* 页面中间顶部 Toast 提示 */
+        .amap-tools-toast {
+            position: fixed !important;
+            top: 24px !important;
+            left: 50% !important;
+            transform: translateX(-50%) translateY(-20px) !important;
+            z-index: 2147483647 !important;
+            padding: 8px 18px !important;
+            background: rgba(33, 150, 243, 0.95) !important;
+            color: #fff !important;
+            font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif !important;
+            font-size: 13px !important;
+            font-weight: 500 !important;
+            border-radius: 20px !important;
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2) !important;
+            opacity: 0 !important;
+            transition: all 0.25s cubic-bezier(0.215, 0.61, 0.355, 1) !important;
+            pointer-events: none !important;
+            backdrop-filter: blur(4px) !important;
+        }
+        .amap-tools-toast.show {
+            opacity: 1 !important;
+            transform: translateX(-50%) translateY(0) !important;
+        }
     `;
     document.head.appendChild(panelStyle);
 
@@ -476,7 +501,7 @@
         // 标题
         const title = document.createElement("div");
         title.className = "polygon-title";
-        title.innerText = currentPolygonData.name;
+        title.innerText = "📍 " + currentPolygonData.name;
         panel.appendChild(title);
 
         // 信息展示
@@ -552,7 +577,6 @@
         const actionsRow = document.createElement("div");
         actionsRow.className = "polygon-actions";
 
-        let copySuccessTimer = null;
         const btnCopy = document.createElement("button");
         btnCopy.type = "button";
         btnCopy.innerText = "复制 GeoJSON";
@@ -560,15 +584,7 @@
             const geoJSON = buildExportData();
             copyTextToClipboard(JSON.stringify(geoJSON, null, 2)).then(
                 function () {
-                    btnCopy.innerText = "✓ 复制成功";
-                    btnCopy.style.backgroundColor = "#4CAF50";
-                    btnCopy.style.borderColor = "#388E3C";
-                    if (copySuccessTimer) clearTimeout(copySuccessTimer);
-                    copySuccessTimer = setTimeout(function () {
-                        btnCopy.innerText = "复制 GeoJSON";
-                        btnCopy.style.backgroundColor = "";
-                        btnCopy.style.borderColor = "";
-                    }, 1800);
+                    showToast("✓ GeoJSON 坐标数据已复制到剪贴板");
                 },
             );
         };
@@ -640,6 +656,26 @@
     }
 
     // ========== 工具函数 ==========
+
+    let toastTimer = null;
+    /** 页面顶部中间 Toast 提示 */
+    function showToast(msg, duration) {
+        duration = duration || 2000;
+        let toast = document.querySelector(".amap-tools-toast");
+        if (!toast) {
+            toast = document.createElement("div");
+            toast.className = "amap-tools-toast";
+            document.body.appendChild(toast);
+        }
+        toast.innerText = msg;
+        void toast.offsetWidth; // 触发重绘以平滑展示动画
+        toast.classList.add("show");
+
+        if (toastTimer) clearTimeout(toastTimer);
+        toastTimer = setTimeout(function () {
+            toast.classList.remove("show");
+        }, duration);
+    }
 
     /** 复制文本到剪贴板 */
     function copyTextToClipboard(text) {
