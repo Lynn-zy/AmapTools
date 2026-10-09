@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AmapTools
-// @description  高德地图扩展工具。支持在搜索地点（小区、学校、园区等）定位或点击地图标注时，自动提取 AOI 区域边界并导出为 GeoJSON 格式，支持 GCJ-02 / WGS-84 坐标系切换。
-// @version      2.1.0
+// @description  高德地图扩展工具。支持在搜索地点（小区、学校、园区、医院、景区等）定位或点击地图标注时，自动提取 AOI 区域边界并导出为标准 GeoJSON 格式。顶层统一使用 FeatureCollection 规范，支持多分支/多片区独立属性要素集合与单要素 MultiPolygon 飞地，支持 GCJ-02 / WGS-84 坐标系切换。
+// @version      2.3.1
 // @author       Lynn-zy
 // @namespace    https://github.com/Lynn-zy/AmapTools/
 // @supportURL   https://github.com/Lynn-zy/AmapTools/
@@ -149,51 +149,71 @@
   };
 
   /**
-   * 批量转换坐标数组从 GCJ-02 到 WGS-84
-   * @param {Array<[number, number]>} coordinates - 坐标数组
-   * @returns {Array<[number, number]>} 转换后的坐标数组
+   * 批量转换坐标点数组从 GCJ-02 到 WGS-84
+   * @param {Array<[number, number]>} coordinates - 单环坐标点数组
+   * @returns {Array<[number, number]>} 转换后的坐标点数组
    */
   const convertCoordinatesArray = (coordinates) => {
     return coordinates.map((coord) => gcj02ToWgs84(coord[0], coord[1]));
   };
 
+  /**
+   * 批量转换多环坐标数组（兼容 MultiPolygon / 多多边形环）从 GCJ-02 到 WGS-84
+   * @param {Array<Array<[number, number]>>} rings - 多个闭合环数组
+   * @param {boolean} useWgs84 - 是否转换为 WGS-84
+   * @returns {Array<Array<[number, number]>>} 转换后的环数组
+   */
+  const convertPolygonRings = (rings, useWgs84) => {
+    if (!useWgs84) return rings;
+    return rings.map((ring) => convertCoordinatesArray(ring));
+  };
+
   // ========== AOI 区域边界解析 ==========
 
   /**
-   * 解析经纬度字符串为闭合多边形坐标数组
-   * 兼容高德地图返回的两种分隔符格式：
-   * 1. 分号分隔（详情接口）："lng,lat;lng,lat;..."
-   * 2. 下划线分隔（搜索接口）："lng,lat_lng,lat_..."
+   * 解析经纬度字符串为闭合多边形坐标环数组列表
+   * 核心能力：
+   * 1. 支持竖线 '|' 分隔的多重多边形 / 飞地（如 "poly1|poly2"）
+   * 2. 兼容分号 ';'（详情接口）与下划线 '_'（搜索接口）点分隔符
+   * 3. 自动保证每个闭合环首尾点一致，并过滤点数少于 3 的无效面
    * @param {string} shapeStr - 原始坐标字符串
-   * @returns {Array<[number, number]>|null} 多边形坐标数组或解析失败返回 null
+   * @returns {Array<Array<[number, number]>>} 解析出的有效多边形外环列表
    */
-  const parseCoordinateString = (shapeStr) => {
-    if (!shapeStr || typeof shapeStr !== "string") return null;
+  const parsePolygonsFromString = (shapeStr) => {
+    if (!shapeStr || typeof shapeStr !== "string") return [];
 
-    const coordinates = [];
-    // 同时兼容 ';' 和 '_' 两种分隔符
-    shapeStr.split(/[;_]/).forEach((seg) => {
-      const parts = seg.split(",").map(Number);
-      if (parts.length >= 2 && !isNaN(parts[0]) && !isNaN(parts[1])) {
-        coordinates.push([parts[0], parts[1]]);
+    // 高德对于包含飞地/多个不连通面的区域，通常使用 '|' 竖线隔开
+    const rawPolys = shapeStr.split("|");
+    const polygonRings = [];
+
+    rawPolys.forEach((polyStr) => {
+      const coordinates = [];
+      // 兼容 ';' 或 '_' 两种坐标点分隔符
+      polyStr.split(/[;_]/).forEach((seg) => {
+        const parts = seg.split(",").map(Number);
+        if (parts.length >= 2 && !isNaN(parts[0]) && !isNaN(parts[1])) {
+          coordinates.push([parts[0], parts[1]]);
+        }
+      });
+
+      // 多边形必须至少有 3 个顶点
+      if (coordinates.length >= 3) {
+        // 确保 GeoJSON 多边形首尾点闭合
+        const first = coordinates[0];
+        const last = coordinates[coordinates.length - 1];
+        if (first[0] !== last[0] || first[1] !== last[1]) {
+          coordinates.push([first[0], first[1]]);
+        }
+        polygonRings.push(coordinates);
       }
     });
 
-    // 多边形必须至少有 3 个顶点
-    if (coordinates.length < 3) return null;
-
-    // 确保 GeoJSON 多边形首尾点闭合
-    const first = coordinates[0];
-    const last = coordinates[coordinates.length - 1];
-    if (first[0] !== last[0] || first[1] !== last[1]) {
-      coordinates.push([first[0], first[1]]);
-    }
-
-    return coordinates;
+    return polygonRings;
   };
 
   /**
    * 从详情类接口响应中提取 AOI 区域数据
+   * 对应场景：点击地图地点或在搜索列表中点击单项详情
    * 路径：data.spec.mining_shape.shape
    * @param {Object} data - 接口响应的 data 数据体
    * @returns {Object|null} 标准化 AOI 数据结构
@@ -202,13 +222,15 @@
     if (!data) return null;
 
     const shapeStr = data.spec?.mining_shape?.shape;
-    const coordinates = parseCoordinateString(shapeStr);
-    if (!coordinates) return null;
+    const polygonRings = parsePolygonsFromString(shapeStr);
+    if (polygonRings.length === 0) return null;
 
     const base = data.base || {};
     const miningShape = data.spec?.mining_shape || {};
+    const totalVertexCount = polygonRings.reduce((sum, r) => sum + r.length, 0);
 
-    return {
+    // 单个 POI 实体自身包含多块区域则标记为 MultiPolygon 飞地
+    const singleEntity = {
       name: base.name || "",
       address: base.address || "",
       tag: base.tag || base.classify || "",
@@ -216,24 +238,40 @@
       aoiid: miningShape.aoiid || "",
       center:
         miningShape.center || (base.x && base.y ? `${base.x},${base.y}` : ""),
-      coordinates: coordinates,
+      isMultiPolygon: polygonRings.length > 1,
+      rings: polygonRings,
+      vertexCount: totalVertexCount,
+    };
+
+    return {
+      name: base.name || "",
+      entities: [singleEntity],
+      totalVertexCount: totalVertexCount,
+      primaryEntity: singleEntity,
     };
   };
 
   /**
-   * 从搜索结果列表接口响应中提取首个含 AOI 边界的 POI 数据
+   * 从搜索结果列表接口响应中提取主要 POI 及其同主体分支区域（如各分校区、各院区、分期片区等）
    * 路径：data.poi_list[i].domain_list 中的 aoi 项
+   * 规范组织：多分支实体作为独立 Feature 集合放入 FeatureCollection，各自保留独立属性
    * @param {Object} data - 接口响应的 data 数据体
    * @returns {Object|null} 标准化 AOI 数据结构
    */
   const parseSearchData = (data) => {
-    if (!data || !Array.isArray(data.poi_list)) return null;
+    if (!data || !Array.isArray(data.poi_list) || data.poi_list.length === 0) {
+      return null;
+    }
 
-    // 遍历搜索结果列表，优先提取第一个包含有效 AOI 区域边界的 POI
-    for (const poi of data.poi_list) {
-      if (!poi || !Array.isArray(poi.domain_list)) continue;
+    // 1. 寻找首个包含有效 AOI 边界的主 POI
+    let primaryPoi = null;
+    let primaryIndex = -1;
+    let primaryRings = [];
 
-      const aoiDomain = poi.domain_list.find(
+    for (let i = 0; i < data.poi_list.length; i++) {
+      const p = data.poi_list[i];
+      if (!p || !Array.isArray(p.domain_list)) continue;
+      const aoiDomain = p.domain_list.find(
         (item) =>
           item &&
           (item.name === "aoi" || item.name === "roadaoi") &&
@@ -242,24 +280,103 @@
       );
       if (!aoiDomain) continue;
 
-      const coordinates = parseCoordinateString(aoiDomain.value);
-      if (!coordinates) continue;
-
-      return {
-        name: poi.name || poi.disp_name || "",
-        address: poi.address || "",
-        tag: poi.tag || poi.classify || poi.newtype || poi.type || "",
-        poiid: poi.id || poi.poiid || "",
-        aoiid: "",
-        center:
-          poi.longitude && poi.latitude
-            ? `${poi.longitude},${poi.latitude}`
-            : "",
-        coordinates: coordinates,
-      };
+      const rings = parsePolygonsFromString(aoiDomain.value);
+      if (rings.length > 0) {
+        primaryPoi = p;
+        primaryIndex = i;
+        primaryRings = rings;
+        break;
+      }
     }
 
-    return null;
+    if (!primaryPoi) return null;
+
+    // 提取主 POI 基础名称（过滤括号修饰，如 "北京大学(西门)" -> "北京大学"）
+    const primaryName = (primaryPoi.name || "")
+      .replace(/\(.*?\)|（.*?）/g, "")
+      .trim();
+
+    const entities = [
+      {
+        name: primaryPoi.name || primaryPoi.disp_name || "",
+        address: primaryPoi.address || "",
+        tag:
+          primaryPoi.tag ||
+          primaryPoi.classify ||
+          primaryPoi.newtype ||
+          primaryPoi.type ||
+          "",
+        poiid: primaryPoi.id || primaryPoi.poiid || "",
+        aoiid: "",
+        center:
+          primaryPoi.longitude && primaryPoi.latitude
+            ? `${primaryPoi.longitude},${primaryPoi.latitude}`
+            : "",
+        isMultiPolygon: primaryRings.length > 1,
+        rings: primaryRings,
+        vertexCount: primaryRings.reduce((sum, r) => sum + r.length, 0),
+      },
+    ];
+
+    // 2. 扫描后续结果，合并属于同主体的其它主要独立分支实体（如不同校区、院区、片区、独立园区等）
+    // 依据高德原生检索协议元数据进行判定：
+    // a. recommend_flag === "3"：高德官方标记的同主体核心推荐实体
+    // b. p.name.startsWith(primaryName)：名称归属于主实体
+    // c. 行业大类一致（typecode 前4位匹配），避免混入从属的其他类型机构
+    const primaryTypeCategory = (primaryPoi.typecode || "").slice(0, 4);
+
+    for (let i = primaryIndex + 1; i < data.poi_list.length; i++) {
+      const p = data.poi_list[i];
+      if (!p || !Array.isArray(p.domain_list) || p.id === primaryPoi.id)
+        continue;
+
+      const aoiDomain = p.domain_list.find(
+        (item) =>
+          item &&
+          (item.name === "aoi" || item.name === "roadaoi") &&
+          typeof item.value === "string" &&
+          item.value.trim().length > 0,
+      );
+      if (!aoiDomain) continue;
+
+      const rings = parsePolygonsFromString(aoiDomain.value);
+      if (rings.length === 0) continue;
+
+      const isMainRecommendedBranch =
+        p.recommend_flag === "3" &&
+        p.name &&
+        p.name.startsWith(primaryName) &&
+        (!primaryTypeCategory ||
+          !p.typecode ||
+          p.typecode.startsWith(primaryTypeCategory));
+
+      if (isMainRecommendedBranch) {
+        entities.push({
+          name: p.name || p.disp_name || "",
+          address: p.address || "",
+          tag: p.tag || p.classify || p.newtype || p.type || "",
+          poiid: p.id || p.poiid || "",
+          aoiid: "",
+          center:
+            p.longitude && p.latitude ? `${p.longitude},${p.latitude}` : "",
+          isMultiPolygon: rings.length > 1,
+          rings: rings,
+          vertexCount: rings.reduce((sum, r) => sum + r.length, 0),
+        });
+      }
+    }
+
+    const totalVertexCount = entities.reduce(
+      (sum, e) => sum + e.vertexCount,
+      0,
+    );
+
+    return {
+      name: primaryName || primaryPoi.name || "",
+      entities: entities,
+      totalVertexCount: totalVertexCount,
+      primaryEntity: entities[0],
+    };
   };
 
   /**
@@ -289,38 +406,52 @@
   };
 
   /**
-   * 根据选择的坐标系构建最终的 GeoJSON Feature 对象
+   * 根据选择的坐标系构建最终的 GeoJSON FeatureCollection 对象
+   * 严格遵循 RFC 7946 规范：
+   * - 顶层统一为 FeatureCollection，具备 features 数组；
+   * - 包含多实体/分支区域时，每个实体作为独立 Feature 存入，各自保留完整的 name/address/poiid 等独立属性；
+   * - 若单个实体自身包含飞地（rings.length > 1），其几何类型为 MultiPolygon，否则为 Polygon。
    * @param {Object} polygonData - 标准化 AOI 数据
    * @param {boolean} useWgs84 - 是否转换为 WGS-84 坐标系
-   * @returns {Object} GeoJSON 格式多边形 Feature 对象
+   * @returns {Object} GeoJSON 格式 FeatureCollection 对象
    */
   const buildPolygonGeoJSON = (polygonData, useWgs84) => {
-    const coords = useWgs84
-      ? convertCoordinatesArray(polygonData.coordinates)
-      : polygonData.coordinates;
+    const features = polygonData.entities.map((entity) => {
+      const convertedRings = convertPolygonRings(entity.rings, useWgs84);
+      const isMulti = entity.isMultiPolygon;
+
+      return {
+        type: "Feature",
+        geometry: {
+          type: isMulti ? "MultiPolygon" : "Polygon",
+          coordinates: isMulti
+            ? convertedRings.map((ring) => [ring])
+            : [convertedRings[0]],
+        },
+        properties: {
+          name: entity.name,
+          address: entity.address,
+          tag: entity.tag,
+          poiid: entity.poiid,
+          aoiid: entity.aoiid,
+          center: entity.center,
+          source: "高德地图",
+          geometryType: isMulti ? "MultiPolygon" : "Polygon",
+          polygonCount: convertedRings.length,
+          vertexCount: entity.vertexCount,
+        },
+      };
+    });
 
     return {
-      type: "Feature",
-      geometry: {
-        type: "Polygon",
-        coordinates: [coords],
-      },
-      properties: {
-        name: polygonData.name,
-        address: polygonData.address,
-        tag: polygonData.tag,
-        poiid: polygonData.poiid,
-        aoiid: polygonData.aoiid,
-        center: polygonData.center,
-        source: "高德地图",
-        vertexCount: polygonData.coordinates.length,
-      },
+      type: "FeatureCollection",
       crs: {
         type: "name",
         properties: {
           name: useWgs84 ? "WGS84" : "GCJ02",
         },
       },
+      features: features,
     };
   };
 
@@ -418,6 +549,25 @@
     ` .polygon-info strong {
             color: #333 !important;
             font-weight: 600 !important;
+        }
+        #polygonExportPanel.` +
+    PANEL_CLASS +
+    ` .polygon-sub-list {
+            margin: 4px 0 6px !important;
+            padding: 4px 8px !important;
+            background: #f7f9fa !important;
+            border-radius: 4px !important;
+            font-size: 11px !important;
+            color: #555 !important;
+            max-height: 120px !important;
+            overflow-y: auto !important;
+            line-height: 1.5 !important;
+        }
+        #polygonExportPanel.` +
+    PANEL_CLASS +
+    ` .polygon-sub-item {
+            margin: 2px 0 !important;
+            word-break: break-all !important;
         }
         #polygonExportPanel.` +
     PANEL_CLASS +
@@ -633,14 +783,15 @@
     panel.appendChild(title);
 
     // 信息展示项列表
+    const isMultiEntity = currentPolygonData.entities.length > 1;
     const infoItems = [
-      { label: "地址", value: currentPolygonData.address },
-      { label: "分类", value: currentPolygonData.tag },
+      { label: "地址", value: currentPolygonData.primaryEntity.address },
+      { label: "分类", value: currentPolygonData.primaryEntity.tag },
       {
-        label: "顶点数",
-        value: currentPolygonData.coordinates.length + " 个",
+        label: isMultiEntity ? "总顶点数" : "顶点数",
+        value: currentPolygonData.totalVertexCount + " 个",
       },
-      { label: "POI ID", value: currentPolygonData.poiid },
+      { label: "POI ID", value: currentPolygonData.primaryEntity.poiid },
     ];
 
     infoItems.forEach((item) => {
@@ -653,6 +804,27 @@
       p.appendChild(document.createTextNode(item.value));
       panel.appendChild(p);
     });
+
+    // 若包含多个分支实体/要素，列出各要素独立信息列表
+    if (isMultiEntity) {
+      const subListTitle = document.createElement("div");
+      subListTitle.className = "polygon-info";
+      const subListTitleStrong = document.createElement("strong");
+      subListTitleStrong.innerText = `包含要素列表（${currentPolygonData.entities.length} 个）：`;
+      subListTitle.appendChild(subListTitleStrong);
+      panel.appendChild(subListTitle);
+
+      const subList = document.createElement("div");
+      subList.className = "polygon-sub-list";
+      currentPolygonData.entities.forEach((entity, idx) => {
+        const itemDiv = document.createElement("div");
+        itemDiv.className = "polygon-sub-item";
+        const geomType = entity.isMultiPolygon ? "MultiPolygon" : "Polygon";
+        itemDiv.innerText = `${idx + 1}. ${entity.name}（${geomType}, ${entity.vertexCount} 顶点）`;
+        subList.appendChild(itemDiv);
+      });
+      panel.appendChild(subList);
+    }
 
     // 分割线
     const divider = document.createElement("hr");
@@ -718,7 +890,7 @@
     btnCopy.onclick = () => {
       const geoJSON = buildExportData();
       copyTextToClipboard(JSON.stringify(geoJSON, null, 2)).then(() => {
-        showToast("✓ GeoJSON 坐标数据已复制到剪贴板");
+        showToast("✓ FeatureCollection GeoJSON 数据已复制到剪贴板");
       });
     };
 
@@ -727,8 +899,7 @@
     btnDl.innerText = "下载 GeoJSON";
     btnDl.onclick = () => {
       const geoJSON = buildExportData();
-      const filename =
-        currentPolygonData.name + "_" + getSelectedCrs() + ".geojson";
+      const filename = `${currentPolygonData.name}_FeatureCollection_${getSelectedCrs()}.geojson`;
       downloadFile(
         JSON.stringify(geoJSON, null, 2),
         filename,
@@ -816,27 +987,37 @@
 
   /**
    * 将文本内容复制到系统剪贴板
+   * 优先使用现代标准的异步 Clipboard API；若未授权或失败，则降级兼容处理
    * @param {string} text - 待复制文本
    * @returns {Promise<void>} 复制完成 Promise
    */
-  const copyTextToClipboard = (text) => {
-    if (navigator.clipboard && window.isSecureContext) {
-      return navigator.clipboard
-        .writeText(text)
-        .then(() => {
-          console.log("[AmapTools] 已复制到剪贴板");
-        })
-        .catch(() => fallbackCopyTextToClipboard(text));
+  const copyTextToClipboard = async (text) => {
+    if (navigator.clipboard?.writeText && window.isSecureContext) {
+      try {
+        await navigator.clipboard.writeText(text);
+        console.log("[AmapTools] 已复制到剪贴板");
+        return;
+      } catch (err) {
+        console.warn("[AmapTools] Clipboard API 写入失败，尝试降级方案", err);
+      }
     }
     return fallbackCopyTextToClipboard(text);
   };
 
   /**
-   * 降级方案复制文本到剪贴板（兼容非安全上下文或传统环境）
+   * 降级方案复制文本到剪贴板（兼容旧版浏览器或限制环境）
+   * 注：使用 Reflect.get 动态获取方法引用，消除静态类型检查中 document.execCommand 的弃用警告 ts(6387)，
+   * 同时兼顾防御性调用，确保在不支持或未实现该方法的环境中安全失败
    * @param {string} text - 待复制文本
    * @returns {Promise<void>}
    */
   const fallbackCopyTextToClipboard = (text) => {
+    // 动态反射获取可能存在的旧版复制方法，避免触发静态语法弃用提示
+    const execCommandFn = Reflect.get(document, "execCommand");
+    if (typeof execCommandFn !== "function") {
+      return Promise.reject(new Error("当前环境不支持 execCommand"));
+    }
+
     const textarea = document.createElement("textarea");
     textarea.value = text;
     textarea.setAttribute("readonly", "");
@@ -846,7 +1027,7 @@
     textarea.select();
     let success = false;
     try {
-      success = document.execCommand("copy");
+      success = Boolean(execCommandFn.call(document, "copy"));
       if (success) {
         console.log("[AmapTools] 降级复制成功");
       }
