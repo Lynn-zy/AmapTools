@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AmapTools
-// @description  高德地图扩展工具。支持在搜索地点（小区、学校、园区、医院、景区等）定位或点击地图标注时，自动提取 AOI 区域边界并导出为标准 GeoJSON 格式。顶层统一使用 FeatureCollection 规范，支持多分支/多片区独立属性要素集合与单要素 MultiPolygon 飞地，支持 GCJ-02 / WGS-84 坐标系切换。
-// @version      2.3.1
+// @description  高德地图扩展工具。支持在搜索地点（小区、学校、园区、医院、景区等）定位或点击地图标注时，自动提取当前定位或点击区域的 AOI 边界并导出为标准 GeoJSON 格式。顶层统一遵循 FeatureCollection 规范，支持单多边形（Polygon）与多重多边形飞地（MultiPolygon），支持 GCJ-02 / WGS-84 坐标系切换。
+// @version      2.4.0
 // @author       Lynn-zy
 // @namespace    https://github.com/Lynn-zy/AmapTools/
 // @supportURL   https://github.com/Lynn-zy/AmapTools/
@@ -30,22 +30,69 @@
   // ========== 接口匹配 ==========
 
   /**
-   * 判断目标 URL 是否为需要拦截的 AOI 区域数据接口
-   * 覆盖场景：
-   * 1. 搜索框检索定位接口：/service/poiInfo、/service/new_key_search
-   * 2. 地图地名标签点击/详情接口：/detail/get/detail、/ssr/api/getPoiDetail、/ssr/api/getPoiInfo
-   * @param {string} url - 请求的目标 URL
-   * @returns {boolean} 是否为目标接口
+   * 从请求 URL 中解析出检索关键词参数（keywords / query）
+   * @param {string} url - 请求 URL
+   * @returns {string} 检索关键词
    */
-  const isTargetAoiUrl = (url) => {
+  const extractSearchKeyword = (url) => {
+    try {
+      const u = new URL(url, window.location.origin);
+      return decodeURIComponent(
+        u.searchParams.get("keywords") || u.searchParams.get("query") || "",
+      ).trim();
+    } catch (_) {
+      return "";
+    }
+  };
+
+  /**
+   * 判断 URL 是否属于旧版或分页模式下的列表展开操作（避免覆盖主实体）
+   * 旧版页面展开候选列表时带有 noreplace=1 或 showBackBtn=1 标识
+   * @param {string} url - 请求 URL
+   * @returns {boolean} 是否为展开操作
+   */
+  const isListExpandUrl = (url) => {
+    const u = String(url || "");
+    return u.includes("noreplace=1") || u.includes("showBackBtn=1");
+  };
+
+  /**
+   * 判断目标 URL 是否为 POI 详情接口（用户主动点击具体地点或查看详情）
+   * 对应场景：在列表中点击单项、在地图上点击具体地名标签
+   * @param {string} url - 请求 URL
+   * @returns {boolean} 是否为详情接口
+   */
+  const isDetailUrl = (url) => {
     const u = String(url || "");
     return (
-      u.includes("/service/poiInfo") ||
-      u.includes("/service/new_key_search") ||
       u.includes("/detail/get/detail") ||
       u.includes("/ssr/api/getPoiDetail") ||
       u.includes("/ssr/api/getPoiInfo")
     );
+  };
+
+  /**
+   * 判断目标 URL 是否为真正的搜索定位接口（排除展开列表请求）
+   * 对应场景：在搜索框中输入关键词并回车/点击搜索按钮
+   * @param {string} url - 请求 URL
+   * @returns {boolean} 是否为搜索接口
+   */
+  const isSearchUrl = (url) => {
+    const u = String(url || "");
+    return (
+      (u.includes("/service/poiInfo") ||
+        u.includes("/service/new_key_search")) &&
+      !isListExpandUrl(u)
+    );
+  };
+
+  /**
+   * 判断目标 URL 是否属于脚本需要拦截的范围
+   * @param {string} url - 请求 URL
+   * @returns {boolean} 是否拦截
+   */
+  const isTargetAoiUrl = (url) => {
+    return isDetailUrl(url) || isSearchUrl(url);
   };
 
   // ========== GCJ-02 → WGS-84 坐标转换 ==========
@@ -56,7 +103,7 @@
   const GCJ_EE = 0.00669342162296594;
 
   /**
-   * 判断坐标是否在中国境外（境外坐标无需偏移纠偏）
+   * 判断坐标是否超出国内范围（境外坐标无需偏移纠偏）
    * @param {number} lng - 经度
    * @param {number} lat - 纬度
    * @returns {boolean} 是否境外
@@ -252,18 +299,18 @@
   };
 
   /**
-   * 从搜索结果列表接口响应中提取主要 POI 及其同主体分支区域（如各分校区、各院区、分期片区等）
-   * 路径：data.poi_list[i].domain_list 中的 aoi 项
-   * 规范组织：多分支实体作为独立 Feature 集合放入 FeatureCollection，各自保留独立属性
+   * 从搜索结果列表接口响应中提取当前检索的主要实体及其平级分支区域
+   * 对应场景：从搜索框搜索后，提取定位到的主实体及平级分支（如多分支实体、多片区机构等）
+   * @param {string} url - 搜索请求的完整 URL（用于提取真实搜索关键词）
    * @param {Object} data - 接口响应的 data 数据体
    * @returns {Object|null} 标准化 AOI 数据结构
    */
-  const parseSearchData = (data) => {
+  const parseSearchData = (url, data) => {
     if (!data || !Array.isArray(data.poi_list) || data.poi_list.length === 0) {
       return null;
     }
 
-    // 1. 寻找首个包含有效 AOI 边界的主 POI
+    // 1. 寻找搜索结果列表中首个包含有效 AOI 边界的主 POI
     let primaryPoi = null;
     let primaryIndex = -1;
     let primaryRings = [];
@@ -291,10 +338,11 @@
 
     if (!primaryPoi) return null;
 
-    // 提取主 POI 基础名称（过滤括号修饰，如 "北京大学(西门)" -> "北京大学"）
-    const primaryName = (primaryPoi.name || "")
-      .replace(/\(.*?\)|（.*?）/g, "")
-      .trim();
+    // 优先从请求 URL 中提取真实的检索关键词，避免因首项带有分期/分部后缀导致前缀匹配失败
+    const searchKeyword =
+      extractSearchKeyword(url) ||
+      (primaryPoi.name || "").replace(/\(.*?\)|（.*?）/g, "").trim() ||
+      primaryPoi.name;
 
     const entities = [
       {
@@ -318,11 +366,7 @@
       },
     ];
 
-    // 2. 扫描后续结果，合并属于同主体的其它主要独立分支实体（如不同校区、院区、片区、独立园区等）
-    // 依据高德原生检索协议元数据进行判定：
-    // a. recommend_flag === "3"：高德官方标记的同主体核心推荐实体
-    // b. p.name.startsWith(primaryName)：名称归属于主实体
-    // c. 行业大类一致（typecode 前4位匹配），避免混入从属的其他类型机构
+    // 2. 扫描后续结果，收集属于同主体的其他平级主要推荐实体（如多校区高校、多园区企业等同主体分支）
     const primaryTypeCategory = (primaryPoi.typecode || "").slice(0, 4);
 
     for (let i = primaryIndex + 1; i < data.poi_list.length; i++) {
@@ -342,15 +386,16 @@
       const rings = parsePolygonsFromString(aoiDomain.value);
       if (rings.length === 0) continue;
 
-      const isMainRecommendedBranch =
+      // 判定规则：高德重点推荐实体（recommend_flag === "3"）、名称归属于主搜索词、且行业大类匹配
+      const isHighlightedBranch =
         p.recommend_flag === "3" &&
         p.name &&
-        p.name.startsWith(primaryName) &&
+        (p.name.includes(searchKeyword) || searchKeyword.includes(p.name)) &&
         (!primaryTypeCategory ||
           !p.typecode ||
           p.typecode.startsWith(primaryTypeCategory));
 
-      if (isMainRecommendedBranch) {
+      if (isHighlightedBranch) {
         entities.push({
           name: p.name || p.disp_name || "",
           address: p.address || "",
@@ -372,7 +417,7 @@
     );
 
     return {
-      name: primaryName || primaryPoi.name || "",
+      name: searchKeyword || primaryPoi.name || "",
       entities: entities,
       totalVertexCount: totalVertexCount,
       primaryEntity: entities[0],
@@ -381,10 +426,11 @@
 
   /**
    * 统一分发并解析高德响应数据
+   * @param {string} url - 请求 URL
    * @param {Object} resData - 接口响应的根 JSON 数据
    * @returns {Object|null} 标准化 AOI 数据结构
    */
-  const parseResponseToPolygonData = (resData) => {
+  const parseResponseToPolygonData = (url, resData) => {
     // 兼容旧版 status:"1" / status:1 以及新版 SSR code:1 状态码
     const isOk =
       resData?.status === "1" || resData?.status === 1 || resData?.code === 1;
@@ -392,14 +438,14 @@
     const data = resData.data;
     if (!data) return null;
 
-    // 1. 若包含详情接口的 spec.mining_shape.shape，按详情解析
-    if (data.spec?.mining_shape?.shape) {
+    // 1. 若为详情接口或单 POI 详情数据结构，按详情精确解析
+    if (isDetailUrl(url) || data.spec?.mining_shape?.shape) {
       return parseDetailData(data);
     }
 
-    // 2. 若包含搜索列表 poi_list，按搜索数据解析
-    if (Array.isArray(data.poi_list)) {
-      return parseSearchData(data);
+    // 2. 若为搜索列表且非列表展开操作，按搜索数据解析
+    if (isSearchUrl(url) && Array.isArray(data.poi_list)) {
+      return parseSearchData(url, data);
     }
 
     return null;
@@ -409,7 +455,7 @@
    * 根据选择的坐标系构建最终的 GeoJSON FeatureCollection 对象
    * 严格遵循 RFC 7946 规范：
    * - 顶层统一为 FeatureCollection，具备 features 数组；
-   * - 包含多实体/分支区域时，每个实体作为独立 Feature 存入，各自保留完整的 name/address/poiid 等独立属性；
+   * - 包含多实体时，各实体作为独立 Feature 存入，各自保留完整的属性信息；
    * - 若单个实体自身包含飞地（rings.length > 1），其几何类型为 MultiPolygon，否则为 Polygon。
    * @param {Object} polygonData - 标准化 AOI 数据
    * @param {boolean} useWgs84 - 是否转换为 WGS-84 坐标系
@@ -456,11 +502,17 @@
   };
 
   /**
-   * 处理拦截到的响应数据：成功提取 AOI 区域后弹出或刷新导出面板
+   * 处理拦截到的响应数据：根据请求类型驱动主实体或详情实体的导出面板展示
+   * @param {string} url - 接口请求的完整 URL
    * @param {Object} resData - 拦截解析得到的响应数据
    */
-  const handleAmapResponse = (resData) => {
-    const parsed = parseResponseToPolygonData(resData);
+  const handleAmapResponse = (url, resData) => {
+    // 列表展开/分页操作（带有 noreplace=1 或 showBackBtn=1），绝不覆盖当前已锁定的主实体
+    if (isListExpandUrl(url)) {
+      return;
+    }
+
+    const parsed = parseResponseToPolygonData(url, resData);
     if (!parsed) return;
     currentPolygonData = parsed;
     displayPolygonPanel();
@@ -672,12 +724,13 @@
       user,
       password,
     ) {
+      const fullUrl = String(url || "");
       // 匹配到目标 AOI 接口后监听完成事件
-      if (isTargetAoiUrl(url)) {
+      if (isTargetAoiUrl(fullUrl)) {
         this.addEventListener("load", () => {
           if (this.readyState === 4 && this.status === 200) {
             try {
-              handleAmapResponse(JSON.parse(this.responseText));
+              handleAmapResponse(fullUrl, JSON.parse(this.responseText));
             } catch (e) {
               console.error("[AmapTools] 解析数据失败", e);
             }
@@ -705,7 +758,7 @@
             .clone()
             .json()
             .then((jsonData) => {
-              handleAmapResponse(jsonData);
+              handleAmapResponse(url, jsonData);
             })
             .catch(() => {
               /* 非 JSON 响应忽略 */
@@ -776,22 +829,23 @@
     };
     panel.appendChild(closeBtn);
 
-    // 标题
+    // 标题（保持纯粹干净，不追加格式规范后缀）
     const title = document.createElement("div");
     title.className = "polygon-title";
     title.innerText = "📍 " + currentPolygonData.name;
     panel.appendChild(title);
 
-    // 信息展示项列表
+    // 信息展示项列表（去除冗余的“格式规范”项）
     const isMultiEntity = currentPolygonData.entities.length > 1;
+    const primary = currentPolygonData.primaryEntity;
     const infoItems = [
-      { label: "地址", value: currentPolygonData.primaryEntity.address },
-      { label: "分类", value: currentPolygonData.primaryEntity.tag },
+      { label: "地址", value: primary.address },
+      { label: "分类", value: primary.tag },
       {
         label: isMultiEntity ? "总顶点数" : "顶点数",
         value: currentPolygonData.totalVertexCount + " 个",
       },
-      { label: "POI ID", value: currentPolygonData.primaryEntity.poiid },
+      { label: isMultiEntity ? "主 POI ID" : "POI ID", value: primary.poiid },
     ];
 
     infoItems.forEach((item) => {
@@ -805,7 +859,7 @@
       panel.appendChild(p);
     });
 
-    // 若包含多个分支实体/要素，列出各要素独立信息列表
+    // 若包含多个高亮实体要素，展示带计数的要素列表
     if (isMultiEntity) {
       const subListTitle = document.createElement("div");
       subListTitle.className = "polygon-info";
@@ -816,11 +870,11 @@
 
       const subList = document.createElement("div");
       subList.className = "polygon-sub-list";
-      currentPolygonData.entities.forEach((entity, idx) => {
+      currentPolygonData.entities.forEach((ent, idx) => {
         const itemDiv = document.createElement("div");
         itemDiv.className = "polygon-sub-item";
-        const geomType = entity.isMultiPolygon ? "MultiPolygon" : "Polygon";
-        itemDiv.innerText = `${idx + 1}. ${entity.name}（${geomType}, ${entity.vertexCount} 顶点）`;
+        const geomType = ent.isMultiPolygon ? "MultiPolygon" : "Polygon";
+        itemDiv.innerText = `${idx + 1}. ${ent.name}（${geomType}, ${ent.vertexCount} 顶点）`;
         subList.appendChild(itemDiv);
       });
       panel.appendChild(subList);
@@ -890,7 +944,7 @@
     btnCopy.onclick = () => {
       const geoJSON = buildExportData();
       copyTextToClipboard(JSON.stringify(geoJSON, null, 2)).then(() => {
-        showToast("✓ FeatureCollection GeoJSON 数据已复制到剪贴板");
+        showToast("✓ GeoJSON 坐标数据已复制到剪贴板");
       });
     };
 
@@ -899,7 +953,12 @@
     btnDl.innerText = "下载 GeoJSON";
     btnDl.onclick = () => {
       const geoJSON = buildExportData();
-      const filename = `${currentPolygonData.name}_FeatureCollection_${getSelectedCrs()}.geojson`;
+      const typeSuffix = isMultiEntity
+        ? "FeatureCollection"
+        : primary.isMultiPolygon
+          ? "MultiPolygon"
+          : "Polygon";
+      const filename = `${currentPolygonData.name}_${typeSuffix}_${getSelectedCrs()}.geojson`;
       downloadFile(
         JSON.stringify(geoJSON, null, 2),
         filename,
